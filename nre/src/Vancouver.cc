@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2014, Markus Partheymueller <mpartheym@os.inf.tu-dresden.de>
  * Copyright (C) 2012, Nils Asmussen <nils@os.inf.tu-dresden.de>
  * Copyright (C) 2007-2009, Bernhard Kauer <bk@vmmon.org>
  * Economic rights: Technische Universitaet Dresden (Germany)
@@ -41,6 +42,7 @@ static size_t guest_size = 0;
 static size_t console = 1;
 static String constitle("VM");
 nre::UserSm globalsm(0);
+bool _dpci = false;
 
 PARAM_HANDLER(PC_PS2, "an alias to create an PS2 compatible PC") {
     static const char *pcps2_params[] = {
@@ -160,12 +162,25 @@ bool Vancouver::receive(MessageHostOp &msg) {
             // TODO res = NOVA_ESUCCESS == nova_semup(_shared_sem[msg.value & 0xff]);
             break;
 
-        case MessageHostOp::OP_ASSIGN_PCI:
-            assert(false);
-            /* TODO res = !Sigma0Base::hostop(msg);
-               _dpci |= res;
-               Logging::printf("%s\n",_dpci ? "DPCI device assigned" : "DPCI failed");*/
-            break;
+        case MessageHostOp::OP_ASSIGN_PCI: {
+            // Find Device
+            BDF bdf(msg.value);
+            try {
+              // Map Config Space
+              uintptr_t mmconfig = _pcicfg->addr(bdf, 0);
+              _regs_ds = new DataSpace(0x1000, DataSpaceDesc::LOCKED, DataSpaceDesc::RW, mmconfig);
+
+              // Assign PCI via NOVA syscall
+              Pd *pd = ExecEnv::get_current_pd();
+              Syscalls::assign_pci(pd->sel(), _regs_ds->virt(), msg.len);
+              res = true;
+            } catch (const Exception &e) {
+              ::Logging::printf("Error: %s: %s\n", e.name(), e.msg());
+              res = false;
+            }
+            _dpci |= res;
+        }
+        break;
 
         case MessageHostOp::OP_GET_MODULE: {
             const nre::Hip &hip = nre::Hip::get();
@@ -206,20 +221,30 @@ bool Vancouver::receive(MessageHostOp &msg) {
             res = true;
             break;
 
-        case MessageHostOp::OP_ATTACH_MSI:
-        case MessageHostOp::OP_ATTACH_IRQ: {
-            assert(false);
-            /* TODO
-               unsigned irq_cap = alloc_cap();
-               myutcb()->head.crd = Crd(irq_cap,0,DESC_CAP_ALL).value();
-               res = !Sigma0Base::hostop(msg);
-               create_irq_thread(
-                    msg.type == MessageHostOp::OP_ATTACH_IRQ ? msg.value : msg.msi_gsi,irq_cap,
-                    do_gsi,"irq");
-             */
+        case MessageHostOp::OP_ATTACH_MSI: {
+            BDF bdf(msg.value);
+            Gsi *gsi = _pci->get_gsi(bdf, msg.msi_value);
+            msg.msi_address = gsi->msi_addr();
+            msg.msi_value = gsi->msi_value();
+            Reference<GlobalThread> irq =
+                                  nre::GlobalThread::create(do_gsi, CPU::current().log_id(), "gsi");
+            msg.msi_gsi = gsi->gsi();
+            irq->set_tls<Vancouver*>(Thread::TLS_PARAM, this);
+            irq->set_tls<Gsi*>(Thread::TLS_PARAM+1, gsi);
+            irq->set_tls<unsigned long>(Thread::TLS_PARAM+2, msg.msi_gsi);
+            irq->start(Qpd(2, 10000));
         }
         break;
-
+        case MessageHostOp::OP_ATTACH_IRQ: {
+            Gsi *gsi = new Gsi(msg.value & 0xff);
+            Reference<GlobalThread> irq =
+                                  nre::GlobalThread::create(do_gsi, CPU::current().log_id(), "gsi");
+            irq->set_tls<Vancouver*>(Thread::TLS_PARAM, this);
+            irq->set_tls<Gsi*>(Thread::TLS_PARAM+1, gsi);
+            irq->set_tls<unsigned long>(Thread::TLS_PARAM+2, msg.value);
+            irq->start(Qpd(2, 10000));
+        }
+        break;
         case MessageHostOp::OP_VCPU_CREATE_BACKEND: {
             cpu_t cpu = CPU::current().log_id();
             VCPUBackend *v = new VCPUBackend(&_mb, msg.vcpu, nre::Hip::get().has_svm(), cpu);
@@ -269,8 +294,15 @@ bool Vancouver::receive(MessageHostOp &msg) {
     return res;
 }
 
-bool Vancouver::receive(MessagePciConfig &) {
-    return false; // TODO !Sigma0Base::pcicfg(msg);
+bool Vancouver::receive(MessagePciConfig &msg) {
+    if (msg.type == MessagePciConfig::TYPE_READ) {
+        msg.value = _pcicfg->read(BDF(msg.bdf), msg.dword << 2);
+        return true;
+    } else if (msg.type == MessagePciConfig::TYPE_WRITE) {
+        _pcicfg->write(BDF(msg.bdf), msg.dword << 2, msg.value);
+        return true;
+    }
+    return false;
 }
 
 bool Vancouver::receive(MessageAcpi &) {
@@ -419,6 +451,23 @@ void Vancouver::network_thread(void*) {
             vc->_mb.bus_network.send(msg);
         }
         vc->_netsess->consumer().next();
+    }
+}
+
+void Vancouver::do_gsi(void*) {
+    Vancouver *vc = Thread::current()->get_tls<Vancouver*>(Thread::TLS_PARAM);
+    Gsi *gsi = Thread::current()->get_tls<Gsi*>(Thread::TLS_PARAM+1);
+    unsigned long value = Thread::current()->get_tls<unsigned long>(Thread::TLS_PARAM+2);
+    bool shared = value >> 8;
+    if (shared) ::Logging::panic("Not implemented...\n");
+
+    while (1) {
+        gsi->down();
+        {
+          ScopedLock<UserSm> guard(&globalsm);
+          MessageIrq msg(MessageIrq::ASSERT_IRQ, value & 0xff);
+          vc->_mb.bus_hostirq.send(msg);
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2014, Markus Partheymueller <mpartheym@os.inf.tu-dresden.de>
  * Copyright (C) 2012, Nils Asmussen <nils@os.inf.tu-dresden.de>
  * Copyright (C) 2007-2009, Bernhard Kauer <bk@vmmon.org>
  * Economic rights: Technische Universitaet Dresden (Germany)
@@ -24,6 +25,9 @@
 #include <services/VMManager.h>
 #include <services/Console.h>
 #include <services/Network.h>
+#include <services/PCIConfig.h>
+#include <kobj/Gsi.h>
+#include <util/PCI.h>
 
 #include <nul/motherboard.h>
 
@@ -33,6 +37,7 @@
 #include "ConsoleBackend.h"
 
 extern nre::UserSm globalsm;
+extern bool _dpci;
 
 class Vancouver : public StaticReceiver<Vancouver> {
     static const uint64_t BASE_MAC  = 0x525402000000;
@@ -42,7 +47,13 @@ public:
                        size_t fbsize)
         : _clock(nre::Hip::get().freq_tsc * 1000), _mb(&_clock, nullptr), _timeouts(_mb),
           _conssess("console", console, constitle), _console(this, fbsize), _netsess(),
-          _vmmng(), _vcpus(), _stdevs() {
+          _vmmng(), _vcpus(), _stdevs(), _pcicfg(), _acpi(), _pci() {
+        try {
+          _pcicfg = new nre::PCIConfigSession("pcicfg");
+          _acpi = new nre::ACPISession("acpi");
+          _pci = new nre::PCI(*_pcicfg, _acpi);
+        } catch(...) {}
+
         // vmmanager is optional
         try {
             _vmmng = new nre::VMManagerSession("vmmanager");
@@ -106,6 +117,7 @@ public:
 private:
     static void network_thread(void*);
     static void keyboard_thread(void*);
+    static void do_gsi(void*);
     static void vmmng_thread(void*);
     void create_devices(const char **args, size_t count);
     void create_vcpus();
@@ -119,4 +131,8 @@ private:
     nre::VMManagerSession *_vmmng;
     nre::SList<VCPUBackend> _vcpus;
     StorageDevice *_stdevs[nre::Storage::MAX_CONTROLLER * nre::Storage::MAX_DRIVES];
+    nre::PCIConfigSession *_pcicfg;
+    nre::ACPISession *_acpi;
+    nre::PCI *_pci;
+    nre::DataSpace *_regs_ds;
 };

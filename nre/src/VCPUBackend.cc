@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2014, Markus Partheymueller <mpartheym@os.inf.tu-dresden.de>
  * Copyright (C) 2012, Nils Asmussen <nils@os.inf.tu-dresden.de>
  * Copyright (C) 2007-2009, Bernhard Kauer <bk@vmmon.org>
  * Economic rights: Technische Universitaet Dresden (Germany)
@@ -177,8 +178,10 @@ bool VCPUBackend::handle_memory(bool need_unmap) {
             (guestbase + (own.offset() << ExecEnv::PAGE_SHIFT) - hostaddr) >> ExecEnv::PAGE_SHIFT;
         CapRange range(own.offset(), 1 << own.order(), Crd::MEM_ALL, delhot);
         //Serial::get() << "Mapping " << range << "\n";
-        uf.delegate(range, UtcbFrame::UPD_GPT);
-        // TODO (_dpci ? MAP_DPT : 0)
+        UtcbFrame::DelFlags flags = _dpci ?
+                                     (UtcbFrame::DelFlags) (UtcbFrame::UPD_GPT | UtcbFrame::UPD_DPT)
+                                   : UtcbFrame::UPD_GPT;
+        uf.delegate(range, flags);
 
         // EPT violation during IDT vectoring?
         if(uf->inj_info & 0x80000000) {
